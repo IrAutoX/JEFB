@@ -1,0 +1,215 @@
+name: Build and Release JEFB
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release'
+        required: true
+        default: '2.4.0'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows
+            shell: cmd
+          - os: ubuntu-latest
+            platform: linux
+            shell: bash
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Setup GPG
+        uses: crazy-max/ghaction-import-gpg@v6
+        with:
+          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
+          passphrase: ${{ secrets.GPG_PASSPHRASE }}
+
+      - name: Clean previous build (Windows)
+        if: matrix.platform == 'windows'
+        shell: cmd
+        run: |
+          taskkill /F /IM java.exe 2>nul
+          taskkill /F /IM javaw.exe 2>nul
+          rmdir /S /Q build 2>nul
+          mkdir build\classes
+          mkdir build\fat
+          mkdir build\fat\icons
+
+      - name: Clean previous build (Linux)
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          rm -rf build
+          mkdir -p build/classes
+          mkdir -p build/fat
+          mkdir -p build/fat/icons
+
+      - name: Compile Java sources (Windows)
+        if: matrix.platform == 'windows'
+        shell: cmd
+        run: |
+          javac -encoding UTF-8 -d build\classes -cp "lib\flatlaf-3.5.jar;lib\flatlaf-extras-3.5.jar;lib\jsvg-1.6.0.jar;lib\rsyntaxtextarea-3.3.1.jar;lib\vineflower-1.12.0.jar" src\main\java\ir\IrAutoX\JEFB\*.java
+
+      - name: Compile Java sources (Linux)
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          javac -encoding UTF-8 -d build/classes -cp "lib/flatlaf-3.5.jar:lib/flatlaf-extras-3.5.jar:lib/jsvg-1.6.0.jar:lib/rsyntaxtextarea-3.3.1.jar:lib/vineflower-1.12.0.jar" src/main/java/ir/IrAutoX/JEFB/*.java
+
+      - name: Copy classes and icons (Windows)
+        if: matrix.platform == 'windows'
+        shell: cmd
+        run: |
+          xcopy build\classes\* build\fat\ /E /I /Y /Q
+          xcopy icons\* build\fat\icons\ /E /I /Y /Q
+
+      - name: Copy classes and icons (Linux)
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          cp -r build/classes/* build/fat/
+          cp -r icons/* build/fat/icons/
+
+      - name: Extract libraries (Windows)
+        if: matrix.platform == 'windows'
+        shell: cmd
+        run: |
+          cd build\fat
+          jar xf ..\..\lib\flatlaf-3.5.jar
+          jar xf ..\..\lib\flatlaf-extras-3.5.jar
+          jar xf ..\..\lib\jsvg-1.6.0.jar
+          jar xf ..\..\lib\rsyntaxtextarea-3.3.1.jar
+          jar xf ..\..\lib\vineflower-1.12.0.jar
+          del META-INF\MANIFEST.MF 2>nul
+          del /S /Q META-INF\*.SF 2>nul
+          del /S /Q META-INF\*.RSA 2>nul
+          cd ..\..
+
+      - name: Extract libraries (Linux)
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          cd build/fat
+          jar xf ../../lib/flatlaf-3.5.jar
+          jar xf ../../lib/flatlaf-extras-3.5.jar
+          jar xf ../../lib/jsvg-1.6.0.jar
+          jar xf ../../lib/rsyntaxtextarea-3.3.1.jar
+          jar xf ../../lib/vineflower-1.12.0.jar
+          rm -f META-INF/MANIFEST.MF
+          find META-INF -name "*.SF" -delete
+          find META-INF -name "*.RSA" -delete
+          cd ../..
+
+      - name: Package fat JAR (Windows)
+        if: matrix.platform == 'windows'
+        shell: cmd
+        run: |
+          jar cfe build\JEFB.jar ir.IrAutoX.JEFB.JBuild -C build\fat .
+          dir build\JEFB.jar
+
+      - name: Package fat JAR (Linux)
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          jar cfe build/JEFB.jar ir.IrAutoX.JEFB.JBuild -C build/fat .
+          ls -lh build/JEFB.jar
+
+      - name: Verify JAR (Windows)
+        if: matrix.platform == 'windows'
+        shell: cmd
+        run: |
+          if not exist build\JEFB.jar exit /b 1
+
+      - name: Verify JAR (Linux)
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          test -f build/JEFB.jar
+
+      - name: Sign JAR with GPG
+        shell: bash
+        run: |
+          gpg --batch --yes --armor --detach-sign build/JEFB.jar
+          ls -lh build/JEFB.jar.asc
+
+      - name: Rename JAR per platform
+        shell: bash
+        run: |
+          mv build/JEFB.jar build/JEFB-${{ matrix.platform }}.jar
+          mv build/JEFB.jar.asc build/JEFB-${{ matrix.platform }}.jar.asc
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: JEFB-${{ matrix.platform }}
+          path: |
+            build/JEFB-${{ matrix.platform }}.jar
+            build/JEFB-${{ matrix.platform }}.jar.asc
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List downloaded files
+        run: find artifacts -type f
+
+      - name: Determine version
+        id: ver
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          else
+            VERSION="dev-$(date +%Y%m%d)-${GITHUB_SHA::7}"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=v$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: JEFB ${{ steps.ver.outputs.version }}
+          files: |
+            artifacts/JEFB-windows/JEFB-windows.jar
+            artifacts/JEFB-windows/JEFB-windows.jar.asc
+            artifacts/JEFB-linux/JEFB-linux.jar
+            artifacts/JEFB-linux/JEFB-linux.jar.asc
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
